@@ -81,7 +81,7 @@
 | 容器 | 试剂瓶（大）325 mL | 气体腔主体 |
 | 容器 | 试剂瓶（小）135 mL | 辅助腔 |
 
-> 接线图与原理图请参见 `docs/schematic.pdf`（待补充）。
+![原理图](docs/images/schematic.png)
 
 ---
 

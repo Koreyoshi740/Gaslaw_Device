@@ -1,0 +1,211 @@
+/*
+ * Copyright (C) 2025 Lawrence Link
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "ui/Popup/PopupProgress.h"
+#include "PixelUI.h"
+#include <cstdio>
+#include <cinttypes>
+
+/**
+ * @brief Construct a progress popup
+ * @param ui Reference to the PixelUI instance
+ * @param width Popup width in pixels
+ * @param height Popup height in pixels
+ * @param value Reference to the integer value being tracked
+ * @param minValue Minimum allowable value
+ * @param maxValue Maximum allowable value
+ * @param title Optional title string
+ * @param duration Display duration in ms
+ * @param priority Popup priority for stacking order
+ * @param cb_function Optional callback invoked when value changes
+ *
+ * Initializes a progress popup and links it to a value reference.
+ */
+PopupProgress::PopupProgress(PixelUI& ui, uint16_t width, uint16_t height,
+                            int32_t& value, int32_t minValue, int32_t maxValue,
+                            const char* title, uint16_t duration, uint8_t priority, std::function<void(int32_t value)> cb_function, bool UseApparentVal, int32_t step, float display_scale)
+    : PopupBase(ui, width, height, priority, duration),
+      _value(value), _minValue(minValue), _maxValue(maxValue), _step(step > 0 ? step : 1), _displayScale(display_scale > 0.0f ? display_scale : 1.0f), _title(title), m_cb(cb_function), use_apparent_val(UseApparentVal)
+{
+}
+
+/**
+ * @brief Format the value as "current/max" string
+ * @param buffer Destination buffer
+ * @param bufferSize Size of the buffer
+ */
+void PopupProgress::formatValue(char* buffer, size_t bufferSize) const {
+    if (buffer && bufferSize > 0) {
+        snprintf(buffer, bufferSize, "%ld/%ld", (long)_value, (long)_maxValue);
+    }
+}
+
+/**
+ * @brief Format the value as a percentage string
+ * @param buffer Destination buffer
+ * @param bufferSize Size of the buffer
+ *
+ * Clamps the value between min and max and outputs "0-100%".
+ */
+void PopupProgress::formatValueAsPercentage(char* buffer, size_t bufferSize) const {
+    if (!buffer || bufferSize == 0) return;
+    
+    if (_maxValue > _minValue) {
+        float progress = (float)(_value - _minValue) / (float)(_maxValue - _minValue);
+        progress = (progress < 0.0f) ? 0.0f : ((progress > 1.0f) ? 1.0f : progress);
+
+        int percentage = (int)(progress * 100.0f + 0.5f);
+
+        if (percentage > 100) percentage = 100;
+
+        snprintf(buffer, bufferSize, "%d%%", percentage);
+    } else {
+        snprintf(buffer, bufferSize, "0%%");
+    }
+}
+
+/**
+ * @brief Draw the popup content (title, progress bar, percentage)
+ * @param centerX X-coordinate of popup center
+ * @param centerY Y-coordinate of popup center
+ * @param currentWidth Current width of popup box
+ * @param currentHeight Current height of popup box
+ *
+ * Uses U8G2 to render a horizontal progress bar and optional title.
+ * Fills the progress proportionally and displays numeric percentage below.
+ */
+void PopupProgress::drawContent(int16_t centerX, int16_t centerY, int16_t currentWidth, int16_t currentHeight) {
+    U8G2& u8g2 = m_ui.getU8G2();
+    
+    // draw title centered above the bar
+    if (_title && strlen(_title) > 0) {
+        u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+        int16_t titleWidth = u8g2.getUTF8Width(_title);
+        u8g2.drawUTF8(centerX - titleWidth / 2, centerY - 7, _title);
+    }
+    
+    // configure progress bar dimensions
+    int16_t barWidth = currentWidth - 20;
+    int16_t barHeight = 8;
+    int16_t barX = centerX - barWidth / 2;
+    int16_t barY = centerY - 3;
+    
+    // draw the bar frame
+    u8g2.drawFrame(barX, barY, barWidth, barHeight);
+    
+    // calculate and fill the progress
+    if (_maxValue > _minValue) {
+        float progress = (float)(_value - _minValue) / (float)(_maxValue - _minValue);
+        progress = (progress < 0.0f) ? 0.0f : ((progress > 1.0f) ? 1.0f : progress);
+        int16_t fillWidth = (int16_t)(progress * (barWidth - 2));
+        
+        if (fillWidth > 0) {
+            u8g2.drawBox(barX + 1, barY + 1, fillWidth, barHeight - 2);
+        }
+    }
+    
+    // draw percentage text below the bar
+    
+    char percentBuffer[16];
+    if (!use_apparent_val) {
+        formatValueAsPercentage(percentBuffer, sizeof(percentBuffer));
+    } else if (_displayScale != 1.0f) {
+        snprintf(percentBuffer, sizeof(percentBuffer), "%.1f", _value * _displayScale);
+    } else {
+        snprintf(percentBuffer, sizeof(percentBuffer), "%" PRId32, _value);
+    }
+    int16_t percentWidth = u8g2.getStrWidth(percentBuffer);
+    u8g2.drawStr(centerX - percentWidth / 2, centerY + 17, percentBuffer);
+}
+
+/**
+ * @brief Handle user input for the progress popup
+ * @param event Input event
+ * @return true if event is consumed
+ *
+ * RIGHT/LEFT increments or decrements the value, invoking the callback if set.
+ * SELECT triggers the closing animation.
+ * Resets the auto-close timer whenever value changes.
+ */
+bool PopupProgress::handleInput(InputEvent event) {
+    if (_state == PopupState::CLOSING) {
+        // consume input but do nothing while closing
+        return true;
+    }
+
+    switch (event) {
+        case InputEvent::RIGHT:
+            _fastRepeatCount = 0;
+            if (_value < _maxValue) {
+                _value = std::min(_value + _step, _maxValue);
+                if (m_cb) m_cb(_value);
+                _startTime = m_ui.getCurrentTime(); // reset auto-close timer
+                m_ui.markDirty();                   // mark for redraw
+            }
+            return true;
+
+        case InputEvent::LEFT:
+            _fastRepeatCount = 0;
+            if (_value > _minValue) {
+                _value = std::max(_value - _step, _minValue);
+                if (m_cb) m_cb(_value);
+                _startTime = m_ui.getCurrentTime();
+                m_ui.markDirty();
+            }
+            return true;
+
+        case InputEvent::RIGHT_FAST: {
+            int32_t mult = (_fastRepeatCount <= 5) ? 2 : (_fastRepeatCount <= 15) ? 5 : 12;
+            _fastRepeatCount++;
+            if (_value < _maxValue) {
+                _value = std::min(_value + _step * mult, _maxValue);
+                if (m_cb) m_cb(_value);
+                _startTime = m_ui.getCurrentTime();
+                m_ui.markDirty();
+            }
+            return true;
+        }
+
+        case InputEvent::LEFT_FAST: {
+            int32_t mult = (_fastRepeatCount <= 5) ? 2 : (_fastRepeatCount <= 15) ? 5 : 12;
+            _fastRepeatCount++;
+            if (_value > _minValue) {
+                _value = std::max(_value - _step * mult, _minValue);
+                if (m_cb) m_cb(_value);
+                _startTime = m_ui.getCurrentTime();
+                m_ui.markDirty();
+            }
+            return true;
+        }
+
+        case InputEvent::SELECT:
+            startClosingAnimation(); // close popup
+            return true;
+
+        default:
+            return PopupBase::handleInput(event); // fallback to base
+    }
+}

@@ -1,0 +1,441 @@
+/*
+ * Copyright (C) 2025 Lawrence Link
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "ui/ListView/ListView.h"
+#include "core/animation/animation.h"
+#include <cinttypes>
+#include <cstdio>
+
+/**
+ * @brief Called when the ListView is entered.
+ * @param exitCallback Callback function to call on exit.
+ *
+ * Initializes font, scroll position, cursor, and initial load animation.
+ * Sets up switch item animation states and triggers scrollbar animation.
+ */
+void ListView::onEnter(ExitCallback exitCallback){
+    IApplication::onEnter(exitCallback);
+    m_ui.setContinousDraw(true);
+
+    U8G2& u8g2 = m_ui.getU8G2();
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312b);
+    FontHeight = u8g2.getFontAscent() - u8g2.getFontDescent();
+    
+    topVisibleIndex_ = 0;
+    scrollOffset_ = 0;
+    currentCursor = 0;
+    isInitialLoad_ = true;
+    
+    onLoad(); // Initialize item data before calculating box states
+
+    // Reset item load animation states
+    for (int i = 0; i < visibleItemCount_ + 1; i++) {
+        itemLoadAnimations_[i] = 0;
+    }
+
+    // Initialize switch animations
+    for (int i = 0; i <= m_itemLength; i++) {
+        if (m_itemList[i].extra.switchValue) {
+            switchAnimStates_[i].boxX = *m_itemList[i].extra.switchValue ? 7 : 0;
+            switchAnimStates_[i].isAnimating = false;
+        }
+    }
+    
+    // Animate scrollbar
+    m_ui.animate(animation_pixel_dots, 32, 400, EasingType::EASE_IN_OUT_CUBIC, PROTECTION::PROTECTED);
+    
+    startLoadAnimation();
+    scrollToTarget();
+}
+
+/**
+ * @brief Start the initial item load animations.
+ *
+ * Each visible item is animated with a staggered delay. The last animation
+ * clears the PROTECTED marks and sets `isInitialLoad_` to false.
+ */
+void ListView::startLoadAnimation() {
+    isInitialLoad_ = true;
+    int maxVisible = std::min(visibleItemCount_ + 1, (int32_t)(m_itemLength + 1));
+
+    for (int i = 0; i < maxVisible; i++) {
+        int duration = 250 + i * 60;
+        bool isLastAnimation = (i == maxVisible - 1);
+        auto callback = [this, i, isLastAnimation](int32_t value) {
+            this->itemLoadAnimations_[i] = value;
+            if (isLastAnimation && value >= FIXED_POINT_ONE) { 
+                this->isInitialLoad_ = false;
+                this->m_ui.getAnimationManPtr()->clearAllProtectionMarks();
+            }
+        };
+
+        auto animation = std::make_shared<CallbackAnimation>(
+            0, FIXED_POINT_ONE, duration, EasingType::EASE_IN_OUT_CUBIC, callback
+        );
+        
+        m_ui.getAnimationManPtr()->markProtected(animation);
+        m_ui.addAnimation(animation);
+    }
+}
+
+/**
+ * @brief Clears all unprotected animations.
+ */
+void ListView::clearNonInitialAnimations() {
+    m_ui.getAnimationManPtr()->clearUnprotected();
+}
+
+/**
+ * @brief Determines whether scrolling is required for the new cursor.
+ * @param newCursor The new cursor index.
+ * @return True if scrolling is needed, false otherwise.
+ */
+bool ListView::shouldScroll(int newCursor) {
+    return (newCursor < topVisibleIndex_ || newCursor >= topVisibleIndex_ + visibleItemCount_);
+}
+
+/**
+ * @brief Update the scroll position based on current cursor.
+ *
+ * Calculates new top visible index and triggers smooth scroll animation
+ * using `m_ui.animate`.
+ */
+void ListView::updateScrollPosition() {
+    if (!shouldScroll(currentCursor)) return;
+
+    int newTopIndex = topVisibleIndex_;
+    if (currentCursor < topVisibleIndex_) newTopIndex = currentCursor;
+    else if (currentCursor >= topVisibleIndex_ + visibleItemCount_)
+        newTopIndex = currentCursor - visibleItemCount_ + 1;
+    
+    int maxTopIndex = std::max((int32_t)0, m_itemLength + 1 - visibleItemCount_);
+    newTopIndex = std::max(0, std::min(newTopIndex, maxTopIndex));
+    
+    if (newTopIndex != topVisibleIndex_) {
+        int32_t targetScrollOffset = -newTopIndex * (FontHeight + spacing_);
+        m_ui.animate(scrollOffset_, targetScrollOffset, 350, EasingType::EASE_OUT_CUBIC, PROTECTION::PROTECTED);
+        topVisibleIndex_ = newTopIndex;
+    }
+}
+
+/**
+ * @brief Calculate the Y coordinate of an item on screen.
+ * @param itemIndex Index of the item.
+ * @return Screen Y position of the item including scroll offset.
+ */
+int32_t ListView::calculateItemY(int itemIndex) {
+    U8G2& u8g2 = m_ui.getU8G2();
+    int32_t baseY = topMargin_ + itemIndex * (FontHeight + spacing_) + u8g2.getFontAscent();
+    return baseY + scrollOffset_;
+}
+
+/**
+ * @brief Scroll UI to ensure target item is visible and animate cursor/progress bar.
+ * @param target Target item index.
+ */
+void ListView::setCursor(int32_t idx) {
+    currentCursor = std::clamp(idx, (int32_t)0, m_itemLength);
+    scrollToTarget();
+}
+
+void ListView::scrollToTarget(){
+    updateScrollPosition();
+    
+    U8G2& u8g2 = m_ui.getU8G2();
+    int screenCursorIndex = currentCursor - topVisibleIndex_;
+    int32_t targetCursorY = topMargin_ + screenCursorIndex * (FontHeight + spacing_) - 1;
+    
+    m_ui.animate(CursorY, targetCursorY, 150, EasingType::EASE_IN_OUT_CUBIC);
+    m_ui.animate(CursorWidth, u8g2.getUTF8Width(m_itemList[currentCursor].title) + 6, 500, EasingType::EASE_OUT_CUBIC);
+    m_ui.animate(progress_bar_top, ((int64_t)currentCursor * 64) / (m_itemLength + 1) + 1, 400, EasingType::EASE_OUT_CUBIC, PROTECTION::PROTECTED);
+    m_ui.animate(progress_bar_bottom, ((int64_t)1 * 64) / (m_itemLength + 1), 400, EasingType::EASE_OUT_CUBIC, PROTECTION::PROTECTED);
+}
+
+/**
+ * @brief Move cursor up by one item and scroll if needed.
+ */
+void ListView::navigateUp() {
+    if (currentCursor != 0) clearNonInitialAnimations();
+    if (currentCursor > 0) {
+        currentCursor--;
+        scrollToTarget();
+    }
+}
+
+/**
+ * @brief Move cursor down by one item and scroll if needed.
+ */
+void ListView::navigateDown() {
+    if (currentCursor != m_itemLength) clearNonInitialAnimations();
+    if (currentCursor < m_itemLength) {
+        currentCursor++;
+        scrollToTarget();
+    }
+}
+
+/**
+ * @brief Trigger action associated with current item selection.
+ *
+ * Handles switching toggle items, entering nested lists, and calling
+ * item-specific functions.
+ */
+void ListView::selectCurrent(){
+    if (currentCursor == 0) { returnToPreviousContext(); return; }
+
+    if (m_itemList[currentCursor].nextList){  
+        m_ui.getAnimationManPtr()->clear();
+        m_history_stack.push_back(etl::make_pair(etl::make_pair(m_itemList, m_itemLength), currentCursor));
+        // Guard against underflow if nextListLength is zero
+        int32_t nextLen = m_itemList[currentCursor].nextListLength;
+        if (nextLen <= 0) nextLen = 0;
+        m_itemLength = nextLen - 1;
+        m_itemList = m_itemList[currentCursor].nextList;
+        currentCursor = 0;
+        m_ui.markFading();
+        startLoadAnimation();
+        scrollToTarget();
+        // return;
+    }
+
+    if (m_itemList[currentCursor].extra.switchValue) {
+        bool* switchValPtr = m_itemList[currentCursor].extra.switchValue;
+        bool currentState = *switchValPtr;
+        int32_t endX = currentState ? 0 : 7;
+
+        int32_t targetIndex = currentCursor;
+        switchAnimStates_[targetIndex].isAnimating = true;
+
+        auto callback = [this, targetIndex](int32_t value) { switchAnimStates_[targetIndex].boxX = value; };
+        auto animation = std::make_shared<CallbackAnimation>(
+            switchAnimStates_[targetIndex].boxX, endX, 200, EasingType::EASE_IN_OUT_CUBIC, callback
+        );
+
+        m_ui.getAnimationManPtr()->markProtected(animation);
+        m_ui.addAnimation(animation);
+
+        *switchValPtr = !currentState;
+        // return;
+    }
+
+    if (m_itemList[currentCursor].pFunc) { 
+        m_itemList[currentCursor].pFunc(); 
+        if (m_itemList[currentCursor].use_fade) {
+            m_ui.markFading();
+        }
+    }
+}
+
+/**
+ * @brief Return to the previous ListView context or exit if none exists.
+ */
+void ListView::returnToPreviousContext() {
+    if (!m_history_stack.empty()){
+        m_ui.getAnimationManPtr()->clear();
+        auto parent_state = m_history_stack.back();
+        m_history_stack.pop_back();
+        m_itemList = parent_state.first.first;
+        m_itemLength = parent_state.first.second;
+        currentCursor = parent_state.second;
+
+        m_ui.markFading();
+        startLoadAnimation();
+        scrollToTarget();
+        return;
+    }
+    else { requestExit(); }
+}
+
+/**
+ * @brief Navigate left: same as returning to previous context.
+ */
+void ListView::navigateLeft() { returnToPreviousContext(); }
+
+/**
+ * @brief Navigate right: same as selecting current item.
+ */
+void ListView::navigateRight() { selectCurrent(); }
+
+/**
+ * @brief Jump cursor up by 3 items for fast scrolling.
+ */
+void ListView::navigateUpFast() {
+    if (currentCursor == 0) return;
+    clearNonInitialAnimations();
+    currentCursor = std::max((int32_t)0, currentCursor - 2);
+    scrollToTarget();
+}
+
+/**
+ * @brief Jump cursor down by 2 items for fast scrolling.
+ */
+void ListView::navigateDownFast() {
+    if (currentCursor == m_itemLength) return;
+    clearNonInitialAnimations();
+    currentCursor = std::min((int32_t)m_itemLength, currentCursor + 2);
+    scrollToTarget();
+}
+
+/**
+ * @brief Handle user input events
+ * @param event Input event enum
+ * @return true if handled, false otherwise
+ */
+bool ListView::handleInput(InputEvent event) {
+    switch (event) {
+        #ifdef LISTVIEW_NAVI_UP
+        case LISTVIEW_NAVI_UP: navigateUp(); return true;
+        #endif
+
+        #ifdef LISTVIEW_NAVI_DOWN
+        case LISTVIEW_NAVI_DOWN: navigateDown(); return true;
+        #endif
+
+        #ifdef LISTVIEW_NAVI_RIGHT
+        case LISTVIEW_NAVI_RIGHT: navigateRight(); return true;
+        #endif
+
+        #ifdef LISTVIEW_NAVI_BACK
+        case LISTVIEW_NAVI_BACK: returnToPreviousContext(); return true;
+        #endif
+
+        #ifdef LISTVIEW_NAVI_LEFT
+        case LISTVIEW_NAVI_LEFT: navigateLeft(); return true;
+        #endif
+
+        #ifdef LISTVIEW_NAVI_SELECT
+        case LISTVIEW_NAVI_SELECT: selectCurrent(); return true;
+        #endif
+
+        case InputEvent::LEFT_FAST:  navigateUpFast();   return true;
+        case InputEvent::RIGHT_FAST: navigateDownFast(); return true;
+
+        default: return false;
+    }
+}
+
+/**
+ * @brief Draw the cursor rectangle and navigation hints.
+ */
+void ListView::drawCursor() {
+    U8G2& u8g2 = m_ui.getU8G2();
+    u8g2.setDrawColor(2);
+    u8g2.drawRBox(CursorX, CursorY - 2, CursorWidth, FontHeight + 3, 0);
+    u8g2.setDrawColor(1);
+
+    if (!currentCursor)
+        u8g2.drawStr(u8g2.getDisplayWidth() - u8g2.getUTF8Width("<") - 5, u8g2.getDisplayHeight(), "<");
+    else
+        u8g2.drawStr(u8g2.getDisplayWidth() - u8g2.getUTF8Width(">") - 5, u8g2.getDisplayHeight(), ">");
+}
+
+/**
+ * @brief Called when resuming ListView.
+ */
+void ListView::onResume() {
+    isInitialLoad_ = false;
+    m_ui.getAnimationManPtr()->clearAllProtectionMarks();
+}
+
+/**
+ * @brief Called when ListView is paused.
+ */
+void ListView::onPause() {
+}
+
+/**
+ * @brief Called when ListView is exited.
+ *
+ * Saves state and clears animations.
+ */
+void ListView::onExit() {
+    onSave();
+    m_ui.setContinousDraw(false);
+}
+
+/**
+ * @brief Draw all visible items and UI elements.
+ */
+void ListView::draw() {
+    U8G2& u8g2 = m_ui.getU8G2();
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312b); 
+    int startIndex = std::max((int32_t)0, topVisibleIndex_ - 2);
+    int endIndex = std::min(m_itemLength, topVisibleIndex_ + visibleItemCount_ + 2);
+    
+    for (int itemIndex = startIndex; itemIndex <= endIndex; itemIndex++) {
+        int32_t itemY = calculateItemY(itemIndex);
+        
+        if (itemY >= -FontHeight && itemY <= u8g2.getDisplayHeight() + FontHeight) {
+            int32_t drawX = 4;
+            if (isInitialLoad_) {
+                int animIndex = itemIndex - topVisibleIndex_;
+                if (animIndex >= 0 && animIndex < visibleItemCount_ + 1) {
+                    int32_t loadProgress = itemLoadAnimations_[animIndex];
+                    drawX = 4 + (FIXED_POINT_ONE - loadProgress) * 30 / FIXED_POINT_ONE;
+                }
+            }
+            u8g2.drawUTF8(drawX, itemY, m_itemList[itemIndex].title);
+            
+            // Draw switch box if present
+            if (m_itemList[itemIndex].extra.switchValue) {
+                u8g2.drawRFrame(u8g2.getDisplayWidth() - 42, itemY - 9, 14, 8, 1);
+                int32_t currentSwitchBoxX = switchAnimStates_.count(itemIndex) ? switchAnimStates_[itemIndex].boxX : (*m_itemList[itemIndex].extra.switchValue ? 7 : 0);
+                u8g2.drawRBox(u8g2.getDisplayWidth() - 42 + currentSwitchBoxX, itemY - 9, 7, 8, 2);
+                u8g2.drawUTF8(u8g2.getDisplayWidth() - 25, itemY - 1, *m_itemList[itemIndex].extra.switchValue ? "ON" : "OFF");
+            }
+
+            if (m_itemList[itemIndex].extra.text) {
+                u8g2.drawStr(u8g2.getDisplayWidth() - u8g2.getUTF8Width(m_itemList[itemIndex].extra.text) - 4, itemY, m_itemList[itemIndex].extra.text);
+            }
+
+            // Draw integer value if present
+            if (m_itemList[itemIndex].extra.intValue) {
+                char buf[16] = {0};
+                snprintf(buf, sizeof(buf), "%" PRId32, *m_itemList[itemIndex].extra.intValue);
+                u8g2.drawStr(u8g2.getDisplayWidth() - u8g2.getUTF8Width(buf) - 8, itemY, buf);
+            }
+
+            // Draw float value if present
+            if (m_itemList[itemIndex].extra.float_dot1f_Value) {
+                char buf[16] = {0};
+                snprintf(buf, sizeof(buf), "%.1f", *m_itemList[itemIndex].extra.float_dot1f_Value);
+                u8g2.drawStr(u8g2.getDisplayWidth() - u8g2.getUTF8Width(buf) - 8, itemY, buf);
+            }
+        }
+    }
+
+    // Draw progress bar and cursor
+    u8g2.drawVLine(126, progress_bar_top, progress_bar_bottom);
+    drawCursor();
+}
+
+/**
+ * @brief Get the visible item index on screen from screen coordinate.
+ * @param screenIndex Index on screen.
+ * @return Actual item index in the list.
+ */
+int ListView::getVisibleItemIndex(int screenIndex) {
+    return topVisibleIndex_ + screenIndex;
+}

@@ -217,6 +217,11 @@ public:
         return ListView::handleInput(event);
     }
 
+    void reattachFocus() {
+        g_valveOpen = charles.isValveOpen();
+        m_ui.markDirty();
+    }
+
     void onLoad() override { g_valveOpen = charles.isValveOpen(); }
     void onSave() override {}
     void onExit() override {}
@@ -663,26 +668,20 @@ public:
             u8g2.drawStr(xOff, 63, m_buf);
 
             if (cnt > 1) {
-                float ptRef  = m_snapData[0].PT;
-                float errSum = 0, maxErr = 0;
-                for (int i = 1; i < cnt; i++) {
-                    float e = fabsf(m_snapData[i].PT - ptRef) / ptRef * 100.0f;
-                    if (e > maxErr) maxErr = e;
-                    errSum += e;
-                }
-                float avgErr = errSum / (cnt - 1);
-                snprintf(m_buf, sizeof(m_buf), "Max:%.2f%%", maxErr);
+                float ptSum = 0;
+                for (int i = 0; i < cnt; i++) ptSum += m_snapData[i].PT;
+                float ptMean = ptSum / cnt;
+                float errSum = 0;
+                for (int i = 0; i < cnt; i++)
+                    errSum += fabsf(m_snapData[i].PT - ptMean) / ptMean * 100.0f;
+                snprintf(m_buf, sizeof(m_buf), "Err:%.2f%%", errSum / cnt);
                 u8g2.drawStr(xOff + 40, 63, m_buf);
-                snprintf(m_buf, sizeof(m_buf), "Avg:%.2f%%", avgErr);
-                u8g2.drawStr(xOff + 84, 63, m_buf);
             } else {
-                u8g2.drawStr(xOff + 40, 63, "Max:---");
-                u8g2.drawStr(xOff + 84, 63, "Avg:---");
+                u8g2.drawStr(xOff + 40, 63, "Err:---");
             }
         } else {
             u8g2.drawStr(xOff,      63, "V:---  ");
-            u8g2.drawStr(xOff + 40, 63, "Max:---");
-            u8g2.drawStr(xOff + 84, 63, "Avg:---");
+            u8g2.drawStr(xOff + 40, 63, "Err:---");
         }
     }
 
@@ -889,6 +888,7 @@ private:
             m_running.enter([this]() {
                 state = CharlesState::NEXT_PAGE;
                 m_ui.setContinousDraw(true);
+                m_settings.reattachFocus();
                 m_ui.markDirty();
             });
         };

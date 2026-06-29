@@ -29,6 +29,7 @@ BoyleLaw::BoyleLaw()
     , _stableCount(4)
     , _stableCounter(0)
     , _lastPressure(0.0f)
+    , _collectTolerance(0.5f)
     , _timerMs(0)
     , _circulateMs(5000)
     , _sampleIntervalMs(1000)
@@ -45,6 +46,7 @@ BoyleLaw::BoyleLaw()
 {
     memset(_volumeSteps, 0, sizeof(_volumeSteps));
     memset(_data, 0, sizeof(_data));
+    memset(_stepCollected, 0, sizeof(_stepCollected));
 }
 
 BoyleLaw::~BoyleLaw() {}
@@ -85,7 +87,7 @@ void BoyleLaw::setPaused(bool paused) {
         _pauseStartMs = millis();
         switch (_state) {
             case INIT_VOLUME:
-            case STEPPING:
+            case COLLECTING:
                 if (_volumeCtrl) _volumeCtrl->stop();
                 break;
             default: break;
@@ -105,9 +107,9 @@ void BoyleLaw::setPaused(bool paused) {
                 _volumeCtrl->start();
             }
             break;
-        case STEPPING:
-            if (_volumeCtrl && _currentStep < _stepCount) {
-                _volumeCtrl->setTargetAirVolume(_volumeSteps[_currentStep]);
+        case COLLECTING:
+            if (_volumeCtrl && _stepCount > 0) {
+                _volumeCtrl->setTargetAirVolume(_volumeSteps[_stepCount - 1]);
                 _volumeCtrl->start();
             }
             break;
@@ -118,6 +120,10 @@ void BoyleLaw::setPaused(bool paused) {
 void BoyleLaw::setStableThreshold(float hPa, uint8_t count) {
     _stableThreshold = hPa;
     _stableCount     = count;
+}
+
+void BoyleLaw::setCollectTolerance(float ml) {
+    _collectTolerance = (ml > 0.0f) ? ml : 0.5f;
 }
 
 void BoyleLaw::setVolumeSteps(const float* totalVolSteps, uint8_t count) {
@@ -162,11 +168,11 @@ void BoyleLaw::start() {
     _dataCount     = 0;
     _stableCounter = 0;
     _lastPressure  = 0.0f;
+    memset(_stepCollected, 0, sizeof(_stepCollected));
 
     // Load steps now so UI can read them during FILLING
     if (_stepMode == AUTO) _loadAutoSteps();
 
-    float initVarVol = _initTotalVolume - _fixedVolume;
     _volumeCtrl->setTargetAirVolume(_initTotalVolume);
     _volumeCtrl->start();
     _state = INIT_VOLUME;
@@ -193,6 +199,7 @@ void BoyleLaw::reset() {
     _dataCount     = 0;
     _stableCounter = 0;
     _paused        = false;
+    memset(_stepCollected, 0, sizeof(_stepCollected));
     if (_stepMode == MANUAL) clearVolumeSteps();
     memset(_data, 0, sizeof(_data));
 }
@@ -209,8 +216,16 @@ void BoyleLaw::_loadAutoSteps() {
 }
 
 void BoyleLaw::_prepareAndGo() {
-    if (_stepMode == AUTO && _stepCount == 0) _loadAutoSteps(); // fallback if not loaded yet
-    _nextStep();
+    if (_stepMode == AUTO && _stepCount == 0) _loadAutoSteps();
+    if (_stepCount == 0) {
+        _state = DONE;
+        if (_onDone) _onDone();
+        return;
+    }
+    // 一次性下发到最小节点（数组末尾）
+    _volumeCtrl->setTargetAirVolume(_volumeSteps[_stepCount - 1]);
+    _volumeCtrl->start();
+    _state = COLLECTING;
 }
 
 float BoyleLaw::_getTotalVolume() const {
@@ -227,19 +242,7 @@ void BoyleLaw::_recordDataPoint() {
 }
 
 void BoyleLaw::_nextStep() {
-    if (_currentStep >= _stepCount) {
-        if (_tempCtrl) _tempCtrl->stop();
-        _state = DONE;
-        printReport();
-        if (_onDone) _onDone();
-        return;
-    }
-
-    float totalVol = _volumeSteps[_currentStep];
-    float varVol   = totalVol - _fixedVolume;
-    _volumeCtrl->setTargetAirVolume(totalVol);
-    _volumeCtrl->start();
-    _state = STEPPING;
+    // 保留空实现，不再使用
 }
 
 // -----------------------------------------------------------------------
@@ -254,9 +257,7 @@ void BoyleLaw::update() {
 
         case INIT_VOLUME:
             if (!_volumeCtrl->isRunning()) {
-                if (_airValve) {
-                    _airValve->close();
-                }
+                if (_airValve) _airValve->close();
                 _tempCheckStartTemp = _bme->getTemperature();
                 _tempCheckStartMs   = millis();
                 _state = TEMP_CHECKING;
@@ -285,52 +286,32 @@ void BoyleLaw::update() {
             }
             break;
 
-        case STEPPING:
-            if (!_volumeCtrl->isRunning()) {
-                _lastPressure     = _bme->getPressure();
-                _timerMs          = millis();
-                _stabilizeStartMs = millis();
-                _stableCounter    = 0;
-                _state            = STABILIZING;
-            }
-            break;
+        case COLLECTING: {
+            float currentVol = _getTotalVolume();
 
-        case STABILIZING:
-            if (millis() - _stabilizeStartMs >= _stabilizeTimeoutMs) {
-                if (_tempCtrl) _tempCtrl->stop();
-                _state = ERROR;
-                if (_onError) _onError();
-                break;
-            }
-            if (millis() - _timerMs >= _sampleIntervalMs) {
-                _timerMs = millis();
-                float currentP = _bme->getPressure();
-                if (isnan(currentP)) break;
-
-                if (fabsf(currentP - _lastPressure) < _stableThreshold) {
-                    _stableCounter++;
-                    if (_stableCounter >= _stableCount) {
-                        _state = RECORDING;
-                    }
-                } else {
-                    _stableCounter = 0;
+            // 遍历所有节点，检查是否进入容差范围
+            for (uint8_t i = 0; i < _stepCount; i++) {
+                if (_stepCollected[i]) continue;
+                if (fabsf(currentVol - _volumeSteps[i]) <= _collectTolerance) {
+                    _stepCollected[i] = true;
+                    _recordDataPoint();
+                    _currentStep = _dataCount;  // 进度 = 已采集数量
+                    const DataPoint& dp = _data[_dataCount - 1];
+                    if (_onStep) _onStep(i, dp);
                 }
-                _lastPressure = currentP;
             }
-            break;
 
-        case RECORDING: {
-            uint8_t before = _dataCount;
-            _recordDataPoint();
-            if (_dataCount == before) {
-                _currentStep++;
-                _nextStep();
-                break;
+            // 泵完成或所有节点已采集 → 结束
+            bool allCollected = true;
+            for (uint8_t i = 0; i < _stepCount; i++) {
+                if (!_stepCollected[i]) { allCollected = false; break; }
             }
-            const DataPoint& dp = _data[_dataCount - 1];
-            if (_onStep) _onStep(_currentStep, dp);
-            _currentStep++;
-            _nextStep();
+            if (allCollected || !_volumeCtrl->isRunning()) {
+                if (_tempCtrl) _tempCtrl->stop();
+                _state = DONE;
+                printReport();
+                if (_onDone) _onDone();
+            }
             break;
         }
 

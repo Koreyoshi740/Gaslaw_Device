@@ -251,6 +251,11 @@ public:
         return ListView::handleInput(event);
     }
 
+    void reattachFocus() {
+        g_valveOpen = boyle.isValveOpen();
+        m_ui.markDirty();
+    }
+
     void onLoad() override { g_valveOpen = boyle.isValveOpen(); }
     void onSave() override {}
     void onExit() override {}
@@ -304,12 +309,9 @@ private:
     StateInfo stateInfo() {
         switch (boyle.getState()) {
             case BoyleLaw::INIT_VOLUME:   return {"Fill", "INITVOL", 0};
-            case BoyleLaw::TEMP_CHECKING: return {"TmpC", "CHEKTMP",  0};
+            case BoyleLaw::TEMP_CHECKING: return {"TmpC", "CHEKTMP", 0};
             case BoyleLaw::WAITING_TEMP:  return {"TmpW", "WAITTMP", 500};
-            case BoyleLaw::STEPPING:      return {"Vol",  "ADJVOL",  0};
-            case BoyleLaw::CIRCULATING:   return {"Mix",  "MIXGAS",  0};
-            case BoyleLaw::STABILIZING:   return {"Stab", "STABLE",  500};
-            case BoyleLaw::RECORDING:     return {"Rec",  "RECORD",  150};
+            case BoyleLaw::COLLECTING:    return {"Rec",  "COLLECT", 150};
             case BoyleLaw::DONE:          return {"Done", "DONE",    0};
             case BoyleLaw::ERROR:         return {"Err",  "ERROR",   300};
             default:                      return {"Idle", "IDLE",    0};
@@ -419,8 +421,7 @@ private:
 
                 // Before experiment starts: show first step; during run: show next step
                 BoyleLaw::State s = boyle.getState();
-                bool running = (s == BoyleLaw::STEPPING || s == BoyleLaw::CIRCULATING
-                             || s == BoyleLaw::STABILIZING || s == BoyleLaw::RECORDING);
+                bool running = (s == BoyleLaw::COLLECTING);
                 float t = running ? boyle.getNextTargetVolume()
                                   : boyle.getCurrentTargetVolume();
 
@@ -725,28 +726,21 @@ public:
                 snprintf(m_buf, sizeof(m_buf), "T:%.1fC", avgT - 273.15f);
             u8g2.drawStr(xOff, 63, m_buf);
 
-            // MaxErr and AvgErr relative to first data point PV
             if (cnt > 1) {
-                float pvRef  = m_snapData[0].PV;
-                float errSum = 0, maxErr = 0;
-                for (int i = 1; i < cnt; i++) {
-                    float e = fabsf(m_snapData[i].PV - pvRef) / pvRef * 100.0f;
-                    if (e > maxErr) maxErr = e;
-                    errSum += e;
-                }
-                float avgErr = errSum / (cnt - 1);
-                snprintf(m_buf, sizeof(m_buf), "Max:%.2f%%", maxErr);
+                float pvSum = 0;
+                for (int i = 0; i < cnt; i++) pvSum += m_snapData[i].PV;
+                float pvMean = pvSum / cnt;
+                float errSum = 0;
+                for (int i = 0; i < cnt; i++)
+                    errSum += fabsf(m_snapData[i].PV - pvMean) / pvMean * 100.0f;
+                snprintf(m_buf, sizeof(m_buf), "Err:%.2f%%", errSum / cnt);
                 u8g2.drawStr(xOff + 36, 63, m_buf);
-                snprintf(m_buf, sizeof(m_buf), "Avg:%.2f%%", avgErr);
-                u8g2.drawStr(xOff + 80, 63, m_buf);
             } else {
-                u8g2.drawStr(xOff + 36, 63, "Max:---");
-                u8g2.drawStr(xOff + 80, 63, "Avg:---");
+                u8g2.drawStr(xOff + 36, 63, "Err:---");
             }
         } else {
             u8g2.drawStr(xOff     , 63, "T:--- ");
-            u8g2.drawStr(xOff + 36, 63, "Max:---");
-            u8g2.drawStr(xOff + 80, 63, "Avg:---");
+            u8g2.drawStr(xOff + 36, 63, "Err:---");
         }
     }
 
@@ -970,6 +964,7 @@ private:
             m_running.enter([this]() {
                 state = BoyleState::NEXT_PAGE;
                 m_ui.setContinousDraw(true);
+                m_settings.reattachFocus();
                 m_ui.markDirty();
             });
         };

@@ -15,10 +15,7 @@ public:
         INIT_VOLUME,        // 初始注水到起始刻度
         TEMP_CHECKING,      // 注水完成后观察温度稳定性
         WAITING_TEMP,       // 等待温度稳定（可跳过）
-        STEPPING,           // 下发体积目标，等待水泵完成
-        CIRCULATING,        // 气泵循环，混合气体
-        STABILIZING,        // 等待压强稳定
-        RECORDING,          // 采样并记录数据点
+        COLLECTING,         // 连贯压缩，途经各节点时自动采集
         DONE,               // 所有步骤完成
         ERROR
     };
@@ -74,6 +71,9 @@ public:
 
     // 压强稳定判断：连续 stableCount 次采样变化 < stableThreshold(hPa)
     void setStableThreshold(float hPa, uint8_t count);
+
+    // 节点采集容差 (mL)，默认 0.5
+    void setCollectTolerance(float ml);
 
     // 气泵循环时间 (ms)，默认 5000
     void setCirculateMs(uint32_t ms);
@@ -174,6 +174,8 @@ private:
     uint8_t _stableCount;
     uint8_t _stableCounter;
     float   _lastPressure;
+    float   _collectTolerance;           // 节点采集容差 (mL)
+    bool    _stepCollected[MAX_STEPS];   // 各节点是否已采集
 
     uint32_t _timerMs;
     uint32_t _circulateMs;

@@ -693,21 +693,16 @@ public:
         u8g2.drawStr(xOff, 63, m_buf);
 
         if (cnt > 1) {
-            float vtRef  = m_snapData[0].VT;
-            float errSum = 0, maxErr = 0;
-            for (int i = 1; i < cnt; i++) {
-                float e = fabsf(m_snapData[i].VT - vtRef) / vtRef * 100.0f;
-                if (e > maxErr) maxErr = e;
-                errSum += e;
-            }
-            float avgErr = errSum / (cnt - 1);
-            snprintf(m_buf, sizeof(m_buf), "Max:%.2f%%", maxErr);
+            float vtSum = 0;
+            for (int i = 0; i < cnt; i++) vtSum += m_snapData[i].VT;
+            float vtMean = vtSum / cnt;
+            float errSum = 0;
+            for (int i = 0; i < cnt; i++)
+                errSum += fabsf(m_snapData[i].VT - vtMean) / vtMean * 100.0f;
+            snprintf(m_buf, sizeof(m_buf), "Err:%.2f%%", errSum / cnt);
             u8g2.drawStr(xOff + 44, 63, m_buf);
-            snprintf(m_buf, sizeof(m_buf), "Avg:%.2f%%", avgErr);
-            u8g2.drawStr(xOff + 88, 63, m_buf);
         } else {
-            u8g2.drawStr(xOff + 44, 63, "Max:---");
-            u8g2.drawStr(xOff + 88, 63, "Avg:---");
+            u8g2.drawStr(xOff + 44, 63, "Err:---");
         }
     }
 

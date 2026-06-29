@@ -14,7 +14,7 @@
 #define FLOW_IN_PIN      33    // 进水流量传感器脉冲引脚
 #define FLOW_OUT_PIN     32    // 出水流量传感器脉冲引脚
 
-#define FLOW_IN_K        86000.0f   // 进水 K 值 (pulses/L)
+#define FLOW_IN_K        79000.0f   // 进水 K 值 (pulses/L)
 #define FLOW_OUT_K       73000.0f   // 出水 K 值 (pulses/L)
 
 // ─── 主水泵（H 桥双向驱动） ──────────────────────────────────────────────────

@@ -400,10 +400,15 @@ void ListView::draw() {
             
             // Draw switch box if present
             if (m_itemList[itemIndex].extra.switchValue) {
+                bool curVal = *m_itemList[itemIndex].extra.switchValue;
+                // Sync cached boxX to actual bool state when no animation is running
+                if (switchAnimStates_.count(itemIndex) && !switchAnimStates_[itemIndex].isAnimating) {
+                    switchAnimStates_[itemIndex].boxX = curVal ? 7 : 0;
+                }
                 u8g2.drawRFrame(u8g2.getDisplayWidth() - 42, itemY - 9, 14, 8, 1);
-                int32_t currentSwitchBoxX = switchAnimStates_.count(itemIndex) ? switchAnimStates_[itemIndex].boxX : (*m_itemList[itemIndex].extra.switchValue ? 7 : 0);
+                int32_t currentSwitchBoxX = switchAnimStates_.count(itemIndex) ? switchAnimStates_[itemIndex].boxX : (curVal ? 7 : 0);
                 u8g2.drawRBox(u8g2.getDisplayWidth() - 42 + currentSwitchBoxX, itemY - 9, 7, 8, 2);
-                u8g2.drawUTF8(u8g2.getDisplayWidth() - 25, itemY - 1, *m_itemList[itemIndex].extra.switchValue ? "ON" : "OFF");
+                u8g2.drawUTF8(u8g2.getDisplayWidth() - 25, itemY - 1, curVal ? "ON" : "OFF");
             }
 
             if (m_itemList[itemIndex].extra.text) {
